@@ -1,0 +1,10 @@
+break-cases=toplevel
+break-collection-expressions=wrap
+function-indent=2
+extension-indent=2
+indent-after-in=2
+let-binding-indent=2
+match-indent=2
+match-indent-nested=always
+cases-exp-indent=2
+margin=100

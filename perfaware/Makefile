@@ -7,4 +7,5 @@ init: install
 	opam init -y
 
 run:
-	ocaml sim8086.ml
+	opam exec -- ocamlfind ocamlc -package bitv -linkpkg -o sim8086 sim8086.ml && ./sim8086
+	rm sim8086{.cmi,.cmo,}
