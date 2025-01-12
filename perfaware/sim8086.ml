@@ -94,20 +94,26 @@ let repr_reg_field = function
   | SI -> "si"
   | DI -> "di"
 
-type opcode = Mov
+type opcode = MovMemoryRegister
 
 let map_opcode byte =
-  match byte land 0b11111100 with
-    | 0b10001000 -> Mov
-    | value -> raise (InvalidOpcode value)
+  if byte land 0b11111100 = 0b10001000 then MovMemoryRegister else raise (InvalidOpcode byte)
+
+let have_second_byte = function
+  | MovMemoryRegister -> true
 
 type instruction = Instruction of opcode * d_field * w_field
 
-let map_instruction = function
-  | byte -> Instruction (map_opcode byte, map_d_field byte, map_w_field byte)
+let instruction_to_string = function
+  | Instruction (MovMemoryRegister, _, _) -> "mov"
 
-let repr_instruction = function
-  | Instruction (Mov, _, _) -> "mov"
+let generate_byte_instruction opcode byte =
+  match opcode with
+    | MovMemoryRegister -> Instruction (MovMemoryRegister, map_d_field byte, map_w_field byte)
+
+let generate_word_instruction opcode byte second_byte =
+  match opcode with
+    | MovMemoryRegister -> Instruction (MovMemoryRegister, map_d_field byte, map_w_field byte)
 
 let read_bytes_from_file filename =
   let ic = open_in_bin filename in
@@ -117,34 +123,19 @@ let read_bytes_from_file filename =
     close_in ic;
     buffer
 
-let match_opcode = function
-  | 217 -> "cx, bx"
-  | 229 -> "ch, ah"
-  | 218 -> "dx, bx"
-  | 222 -> "si, bx"
-  | 251 -> "bx, di"
-  | 200 -> "al, cl"
-  | 237 -> "ch, ch"
-  | 195 -> "bx, ax"
-  | 243 -> "bx, si"
-  | 252 -> "sp, di"
-  | 197 -> "bp, ax"
-  | byte -> Printf.sprintf "%i" byte
-
-let foo byte iteration =
-  match iteration mod 2 = 0 with
-    | true ->
-      let instruction = map_instruction byte in
-        repr_instruction instruction
-    | false -> match_opcode byte
-
 let print_bytes_in_binary bits bytes =
   let len = Bytes.length bytes in
-    for i = 0 to len - 1 do
-      let int = Bytes.get_uint8 bytes i in
-      let opcode = foo int i in
-        Printf.printf "%s " opcode;
-        if (i + 1) mod (bits / 8) = 0 || i = len - 1 then Printf.printf "\n"
+  let i = ref 0 in
+    while !i < len do
+      let byte = Bytes.get_uint8 bytes !i in
+      let opcode = map_opcode byte in
+      let second_byte = have_second_byte opcode in
+      let instruction =
+        if second_byte then generate_word_instruction opcode byte (Bytes.get_uint8 bytes !i + 1)
+        else generate_byte_instruction opcode byte
+      in
+        i := if second_byte then !i + 2 else !i + 1;
+        Printf.printf "%s \n" (instruction_to_string instruction)
     done
 
 let () =
