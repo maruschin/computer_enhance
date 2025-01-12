@@ -2,47 +2,37 @@ exception InvalidInput of int
 exception InvalidOpcode of int
 exception InvalidFieldValue of int
 
-type s_field =
-  | NoSign (* =0 No sign extension *)
-  | Sign (* =1 Sign extend 8-bit immediate data to 16 bits if W=1 *)
+type s_field = NoSign | Sign
 
 let map_s_field = function
   | 0b0 -> NoSign
   | 0b1 -> Sign
   | value -> raise (InvalidFieldValue value)
 
-type w_field =
-  | Byte (* =0 Instruction operates on byte data *)
-  | Word (* =1 Instruction operates on word data *)
+type data_size_field = ByteData | WordData
 
-let map_w_field byte =
+let parse_data_size_field byte =
   match byte land 0b1 with
-    | 0b0 -> Byte (* 8bit address *)
-    | 0b1 -> Word (* 16bit address *)
+    | 0b0 -> ByteData
+    | 0b1 -> WordData
     | value -> raise (InvalidFieldValue value)
 
-type d_field =
-  | FromRegField (* =0 Instruction source is specified in REG field *)
-  | ToRegField (* =1 Instruction destination is specified in REG field *)
+type direction_field = SourceFromRegister | DestinationToRegister
 
-let map_d_field byte =
+let map_direction_field byte =
   match (byte lsr 1) land 0b1 with
-    | 0b0 -> FromRegField
-    | 0b1 -> ToRegField
+    | 0b0 -> SourceFromRegister
+    | 0b1 -> DestinationToRegister
     | value -> raise (InvalidFieldValue value)
 
-type v_field =
-  | One (* =0 Shift/rotate count is one *)
-  | InCLRegister (* =1 Shift/rotate count is specified in CL register *)
+type v_field = One | InCLRegister
 
 let map_v_field = function
   | 0b0 -> One
   | 0b1 -> InCLRegister
   | value -> raise (InvalidFieldValue value)
 
-type z_field =
-  | FlagClear (* =0 Repeat/loop while zero flag is clear *)
-  | FlagSet (* =1 Repeat/loop while zero flag is set *)
+type z_field = FlagClear | FlagSet
 
 let map_z_field = function
   | 0b0 -> FlagClear
@@ -56,27 +46,28 @@ let map_mod_field = function
   | value -> raise (InvalidFieldValue value)
 
 type reg_field = AL | BL | CL | DL | AH | BH | CH | DH | AX | BX | CX | DX | SP | BP | SI | DI
+type rm_field = reg_field
 
 let map_reg_field = function
-  | 0b000, Byte -> AL
-  | 0b011, Byte -> BL
-  | 0b001, Byte -> CL
-  | 0b010, Byte -> DL
-  | 0b100, Byte -> AH
-  | 0b111, Byte -> BH
-  | 0b101, Byte -> CH
-  | 0b110, Byte -> DH
-  | 0b000, Word -> AX
-  | 0b001, Word -> CX
-  | 0b010, Word -> DX
-  | 0b011, Word -> BX
-  | 0b100, Word -> SP
-  | 0b101, Word -> BP
-  | 0b110, Word -> SI
-  | 0b111, Word -> DI
+  | 0b000, ByteData -> AL
+  | 0b011, ByteData -> BL
+  | 0b001, ByteData -> CL
+  | 0b010, ByteData -> DL
+  | 0b100, ByteData -> AH
+  | 0b111, ByteData -> BH
+  | 0b101, ByteData -> CH
+  | 0b110, ByteData -> DH
+  | 0b000, WordData -> AX
+  | 0b001, WordData -> CX
+  | 0b010, WordData -> DX
+  | 0b011, WordData -> BX
+  | 0b100, WordData -> SP
+  | 0b101, WordData -> BP
+  | 0b110, WordData -> SI
+  | 0b111, WordData -> DI
   | value, _ -> raise (InvalidFieldValue value)
 
-let repr_reg_field = function
+let reg_field_to_string = function
   | AL -> "al"
   | BL -> "bx"
   | CL -> "cl"
@@ -94,26 +85,44 @@ let repr_reg_field = function
   | SI -> "si"
   | DI -> "di"
 
-type opcode = MovMemoryRegister
+type instruction =
+  | MovRegisterMemoryToFromRegister of
+      direction_field * data_size_field * mod_field * reg_field * rm_field
+  | MovImmediateToRegisterMemory of data_size_field * mod_field * rm_field
+  | MovImmediateToRegister of data_size_field * reg_field
 
-let map_opcode byte =
-  if byte land 0b11111100 = 0b10001000 then MovMemoryRegister else raise (InvalidOpcode byte)
-
-let have_second_byte = function
-  | MovMemoryRegister -> true
-
-type instruction = Instruction of opcode * d_field * w_field
+let parse_instruction bytes idx =
+  let first_byte = Bytes.get_uint8 bytes idx in
+    match first_byte land 0b11110000 with
+      | 0b10000000 -> (
+        match first_byte land 0b11111100 with
+          | 0b10001000 ->
+            let second_byte = Bytes.get_uint8 bytes (idx + 1) in
+            let direction = map_direction_field first_byte in
+            let data_size = parse_data_size_field first_byte in
+            let mod_field = map_mod_field (second_byte lsr 6) in
+            let reg_field = map_reg_field ((second_byte lsr 3) land 0b111, data_size) in
+            let rm_field = map_reg_field (second_byte land 0b111, data_size) in
+              ( MovRegisterMemoryToFromRegister
+                  (direction, data_size, mod_field, reg_field, rm_field),
+                2 )
+          | _ -> raise (InvalidOpcode first_byte))
+      | 0b11000000 -> (
+        match first_byte land 0b11111110 with
+          | 0b11000110 ->
+            let second_byte = Bytes.get_uint8 bytes (idx + 1) in
+            let data_size = parse_data_size_field first_byte in
+            let mod_field = map_mod_field (second_byte lsr 6) in
+            let rm_field = map_reg_field (second_byte land 0b111, data_size) in
+              (MovImmediateToRegisterMemory (data_size, mod_field, rm_field), 1)
+          | _ -> raise (InvalidOpcode first_byte))
+      | _ -> raise (InvalidOpcode first_byte)
 
 let instruction_to_string = function
-  | Instruction (MovMemoryRegister, _, _) -> "mov"
-
-let generate_byte_instruction opcode byte =
-  match opcode with
-    | MovMemoryRegister -> Instruction (MovMemoryRegister, map_d_field byte, map_w_field byte)
-
-let generate_word_instruction opcode byte second_byte =
-  match opcode with
-    | MovMemoryRegister -> Instruction (MovMemoryRegister, map_d_field byte, map_w_field byte)
+  | MovRegisterMemoryToFromRegister (_, _, Register, reg_field, rm_field) ->
+    Printf.sprintf "mov %s, %s" (reg_field_to_string reg_field) (reg_field_to_string rm_field)
+  | MovImmediateToRegisterMemory _ -> "mov"
+  | MovImmediateToRegister _ -> "mov"
 
 let read_bytes_from_file filename =
   let ic = open_in_bin filename in
@@ -127,14 +136,8 @@ let print_bytes_in_binary bits bytes =
   let len = Bytes.length bytes in
   let i = ref 0 in
     while !i < len do
-      let byte = Bytes.get_uint8 bytes !i in
-      let opcode = map_opcode byte in
-      let second_byte = have_second_byte opcode in
-      let instruction =
-        if second_byte then generate_word_instruction opcode byte (Bytes.get_uint8 bytes !i + 1)
-        else generate_byte_instruction opcode byte
-      in
-        i := if second_byte then !i + 2 else !i + 1;
+      let instruction, forward_steps = parse_instruction bytes !i in
+        i := !i + forward_steps;
         Printf.printf "%s \n" (instruction_to_string instruction)
     done
 
