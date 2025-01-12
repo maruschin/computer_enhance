@@ -22,8 +22,8 @@ let parse_data_size byte =
 
 let parse_data bytes idx data_size =
   match data_size with
-    | `ByteData -> Bytes.get_uint8 bytes (idx + 2)
-    | `WordData -> Bytes.get_uint16_ne bytes (idx + 2)
+    | `ByteData -> Bytes.get_uint8 bytes idx
+    | `WordData -> Bytes.get_uint16_ne bytes idx
 
 type direction = SourceFromRegister | DestinationToRegister
 
@@ -65,7 +65,7 @@ let parse_mode value bytes idx =
     | 0b01 -> MemoryModeLowDisplacement (Bytes.get_uint8 bytes (idx + 2))
     | 0b10 -> MemoryModeHighDisplacement (Bytes.get_uint16_ne bytes (idx + 2))
     | 0b11 -> RegisterMode
-    | value -> raise (failwith (Printf.sprintf "Invalid mode value %i" value))
+    | value -> failwith (Printf.sprintf "Invalid mode value %i" value)
 
 type register = AL | BL | CL | DL | AH | BH | CH | DH | AX | BX | CX | DX | SP | BP | SI | DI
 
@@ -86,7 +86,7 @@ let parse_register = function
   | 0b101, `WordData -> BP
   | 0b110, `WordData -> SI
   | 0b111, `WordData -> DI
-  | value, _ -> raise (failwith (Printf.sprintf "Invalid register value %i" value))
+  | value, _ -> failwith (Printf.sprintf "Invalid register value %i" value)
 
 let register_to_string = function
   | AL -> "al"
@@ -121,7 +121,7 @@ let map_register_map_to_address_calculation = function
   | 0b101 -> Memory DI
   | 0b110 -> Memory BP
   | 0b111 -> Memory BX
-  | value -> raise (failwith (Printf.sprintf "Invalid register_memory_valculation value %i" value))
+  | value -> failwith (Printf.sprintf "Invalid register_memory_valculation value %i" value)
 
 let parse_register_memory mode register_byte data_size =
   match mode with
@@ -133,11 +133,12 @@ let parse_register_memory mode register_byte data_size =
 let register_memory_to_string mode displacement =
   match (mode, displacement) with
     | Register register, None -> register_to_string register
-    | Memory register, None -> Printf.sprintf "[%s]" (register_to_string register)
+    | Memory register, None | Memory register, Some 0 ->
+      Printf.sprintf "[%s]" (register_to_string register)
     | Memory register, Some displacement ->
-      if displacement > 0 then Printf.sprintf "[%s + %i]" (register_to_string register) displacement
-      else Printf.sprintf "[%s]" (register_to_string register)
-    | MemorySum (left_register, right_register), None ->
+      Printf.sprintf "[%s + %i]" (register_to_string register) displacement
+    | MemorySum (left_register, right_register), None
+    | MemorySum (left_register, right_register), Some 0 ->
       Printf.sprintf "[%s + %s]"
         (register_to_string left_register)
         (register_to_string right_register)
@@ -178,19 +179,17 @@ let parse_instruction bytes idx =
             let data_size = parse_data_size first_byte in
             let mode = parse_mode (second_byte lsr 6) bytes idx in
             let register_memory = parse_register_memory mode (second_byte land 0b111) data_size in
-            let data = Bytes.get_uint8 bytes (idx + mode_bitshift mode) in
+            let data = parse_data bytes (idx + mode_bitshift mode) data_size in
             let bitshift = mode_bitshift mode + data_size_bitshift data_size in
               (MovImmediateToRegisterMemory (data_size, mode, register_memory, data), bitshift)
           | _ -> raise (InvalidOpcode first_byte))
-      | 0b10110000 -> (
+      | 0b10110000 ->
         let data_size = parse_data_size ((first_byte lsr 3) land 0b1) in
         let register = parse_register (first_byte land 0b111, data_size) in
-          match data_size with
-            | `ByteData ->
-              (MovImmediateToRegister (data_size, register, Bytes.get_uint8 bytes (idx + 1)), 2)
-            | `WordData ->
-              (MovImmediateToRegister (data_size, register, Bytes.get_uint16_ne bytes (idx + 1)), 3)
-        )
+        let mode_bitshift = 1 in
+        let bitshift = mode_bitshift + data_size_bitshift data_size in
+        let data = parse_data bytes (idx + mode_bitshift) data_size in
+          (MovImmediateToRegister (data_size, register, data), bitshift)
       | _ -> raise (InvalidOpcode first_byte)
 
 let instruction_to_string = function
