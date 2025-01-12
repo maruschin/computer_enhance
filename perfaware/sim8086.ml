@@ -112,6 +112,18 @@ type register_memory =
   | MemorySum of register * register
   | DirectAddress of int
 
+let is_direct_address = function
+  | Memory BP -> true
+  | DirectAddress _ -> true
+  | _ -> false
+
+let direct_address_bitshift register_memory data_size =
+  if is_direct_address register_memory then
+    match data_size with
+      | `ByteData -> 1
+      | `WordData -> 2
+  else 0
+
 let map_register_map_to_address_calculation = function
   | 0b000 -> MemorySum (BX, SI)
   | 0b001 -> MemorySum (BX, DI)
@@ -130,6 +142,10 @@ let parse_register_memory mode register_byte data_size =
     | MemoryModeLowDisplacement _ | MemoryModeHighDisplacement _ ->
       map_register_map_to_address_calculation register_byte
 
+let parse_direct_address_mode register_memory bytes idx =
+  if is_direct_address register_memory then DirectAddress (Bytes.get_uint16_ne bytes (idx + 2))
+  else register_memory
+
 let register_memory_to_string mode displacement =
   match (mode, displacement) with
     | Register register, None -> register_to_string register
@@ -147,13 +163,18 @@ let register_memory_to_string mode displacement =
         (register_to_string left_register)
         (register_to_string right_register)
         displacement
-    | DirectAddress address, None -> Printf.sprintf "%i" address
+    | DirectAddress address, None -> Printf.sprintf "[%i]" address
     | _ -> "error"
 
+type operation = Mov
+
 type instruction =
-  | MovRegisterMemoryToFromRegister of direction * data_size * mode * register * register_memory
-  | MovImmediateToRegisterMemory of data_size * mode * register_memory * int
-  | MovImmediateToRegister of data_size * register * int
+  | RegisterMemoryToFromRegister of
+      operation * direction * data_size * mode * register * register_memory
+  | ImmediateToRegisterMemory of operation * data_size * mode * register_memory * int
+  | ImmediateToRegister of operation * data_size * register * int
+  | MemoryToAccumulator of operation * data_size * int
+  | AccumulatorToMemory of operation * data_size * int
 
 let parse_instruction bytes idx =
   let first_byte = Bytes.get_uint8 bytes idx in
@@ -167,9 +188,10 @@ let parse_instruction bytes idx =
             let mode = parse_mode (second_byte lsr 6) bytes idx in
             let register = parse_register ((second_byte lsr 3) land 0b111, data_size) in
             let register_memory = parse_register_memory mode (second_byte land 0b111) data_size in
-            let bitshift = mode_bitshift mode in
-              ( MovRegisterMemoryToFromRegister
-                  (direction, data_size, mode, register, register_memory),
+            let register_memory = parse_direct_address_mode register_memory bytes idx in
+            let bitshift = mode_bitshift mode + direct_address_bitshift register_memory data_size in
+              ( RegisterMemoryToFromRegister
+                  (Mov, direction, data_size, mode, register, register_memory),
                 bitshift )
           | _ -> raise (InvalidOpcode first_byte))
       | 0b11000000 -> (
@@ -181,7 +203,7 @@ let parse_instruction bytes idx =
             let register_memory = parse_register_memory mode (second_byte land 0b111) data_size in
             let data = parse_data bytes (idx + mode_bitshift mode) data_size in
             let bitshift = mode_bitshift mode + data_size_bitshift data_size in
-              (MovImmediateToRegisterMemory (data_size, mode, register_memory, data), bitshift)
+              (ImmediateToRegisterMemory (Mov, data_size, mode, register_memory, data), bitshift)
           | _ -> raise (InvalidOpcode first_byte))
       | 0b10110000 ->
         let data_size = parse_data_size ((first_byte lsr 3) land 0b1) in
@@ -189,11 +211,26 @@ let parse_instruction bytes idx =
         let mode_bitshift = 1 in
         let bitshift = mode_bitshift + data_size_bitshift data_size in
         let data = parse_data bytes (idx + mode_bitshift) data_size in
-          (MovImmediateToRegister (data_size, register, data), bitshift)
-      | _ -> raise (InvalidOpcode first_byte)
+          (ImmediateToRegister (Mov, data_size, register, data), bitshift)
+      | 0b10100000 -> (
+        match first_byte land 0b11111110 with
+          | 0b10100000 ->
+            let data_size = parse_data_size first_byte in
+            let mode_bitshift = 1 in
+            let data = parse_data bytes (idx + mode_bitshift) data_size in
+            let bitshift = mode_bitshift + data_size_bitshift data_size in
+              (MemoryToAccumulator (Mov, data_size, data), bitshift)
+          | 0b10100010 ->
+            let data_size = parse_data_size first_byte in
+            let mode_bitshift = 1 in
+            let data = parse_data bytes (idx + mode_bitshift) data_size in
+            let bitshift = mode_bitshift + data_size_bitshift data_size in
+              (AccumulatorToMemory (Mov, data_size, data), bitshift)
+          | _ -> raise (InvalidOpcode first_byte))
+      | _ -> failwith (Printf.sprintf "Invalid opcode %i" (Bytes.get_uint8 bytes (idx - 2)))
 
 let instruction_to_string = function
-  | MovRegisterMemoryToFromRegister (direction, _, mode, register, register_memory) -> (
+  | RegisterMemoryToFromRegister (Mov, direction, _, mode, register, register_memory) -> (
     match (direction, mode) with
       | DestinationToRegister, RegisterMode ->
         Printf.sprintf "mov %s, %s" (register_to_string register)
@@ -218,7 +255,7 @@ let instruction_to_string = function
         Printf.sprintf "mov %s, %s"
           (register_memory_to_string register_memory None)
           (register_to_string register))
-  | MovImmediateToRegisterMemory (data_size, mode, register_memory, data) -> (
+  | ImmediateToRegisterMemory (Mov, data_size, mode, register_memory, data) -> (
     match mode with
       | RegisterMode -> Printf.sprintf "mov %s" (register_memory_to_string register_memory None)
       | MemoryModeLowDisplacement displacement | MemoryModeHighDisplacement displacement -> (
@@ -238,8 +275,10 @@ let instruction_to_string = function
           | `WordData ->
             (Printf.sprintf "mov %s word %i" (register_memory_to_string register_memory None)) data)
     )
-  | MovImmediateToRegister (_, register, value) ->
+  | ImmediateToRegister (Mov, _, register, value) ->
     Printf.sprintf "mov %s, %i" (register_to_string register) value
+  | MemoryToAccumulator (Mov, _, value) -> Printf.sprintf "mov ax, [%i]" value
+  | AccumulatorToMemory (Mov, _, value) -> Printf.sprintf "mov [%i], ax" value
 
 let read_bytes_from_file filename =
   let ic = open_in_bin filename in
@@ -259,6 +298,6 @@ let print_bytes_in_binary bits bytes =
     done
 
 let () =
-  let filename = "./part1/listing_0039_more_movs" in
+  let filename = "./part1/listing_0040_challenge_movs" in
   let bytes = read_bytes_from_file filename in
     print_bytes_in_binary 16 bytes
