@@ -1,4 +1,4 @@
-.DEFAULT_GOAL := run
+.DEFAULT_GOAL := default
 
 install:
 	brew install opam ocaml
@@ -6,6 +6,10 @@ install:
 init: install
 	opam init -y
 
+clean:
+	rm sim8086{.cmi,.cmo,}
+
 run:
 	opam exec -- ocamlfind ocamlc -package bitv -linkpkg -o sim8086 sim8086.ml && ./sim8086
-	rm sim8086{.cmi,.cmo,}
+
+default: run clean
