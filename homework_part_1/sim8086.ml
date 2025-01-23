@@ -1,3 +1,9 @@
+let int_to_binary n =
+  if n = 0 then "0"
+  else
+    let rec loop x acc = if x = 0 then acc else loop (x lsr 1) (string_of_int (x land 1) ^ acc) in
+      loop n ""
+
 exception InvalidInput of int
 
 module S = struct
@@ -23,22 +29,13 @@ module W = struct
     | Word -> 2
 end
 
-module Data = struct
-  type t = Byte of int | Word of int
-
-  let parse bytes idx data_size =
-    match data_size with
-      | W.Byte -> Byte (Bytes.get_uint8 bytes idx)
-      | W.Word -> Word (Bytes.get_uint16_ne bytes idx)
-end
-
-module Direction = struct
-  type t = [ `SourceFromRegister | `DestinationToRegister ]
+module D = struct
+  type t = SourceFromRegister | DestinationToRegister
 
   let parse code =
     match (code lsr 1) land 0b1 with
-      | 0b0 -> `SourceFromRegister
-      | 0b1 -> `DestinationToRegister
+      | 0b0 -> SourceFromRegister
+      | 0b1 -> DestinationToRegister
       | code -> failwith (Printf.sprintf "Invalid direction value %i" code)
 end
 
@@ -58,6 +55,19 @@ module Z = struct
     | 0b0 -> `FlagClear
     | 0b1 -> `FlagSet
     | code -> failwith (Printf.sprintf "Invalid z_field value %i" code)
+end
+
+module Data = struct
+  type t = Byte of int | Word of int
+
+  let parse bytes idx data_size =
+    match data_size with
+      | W.Byte -> Byte (Bytes.get_uint8 bytes idx)
+      | W.Word -> Word (Bytes.get_uint16_ne bytes idx)
+
+  let to_string = function
+    | Byte value -> Printf.sprintf "byte %i" value
+    | Word value -> Printf.sprintf "word %i" value
 end
 
 module Displacement = struct
@@ -189,38 +199,76 @@ module RegisterMemory = struct
       | DirectAddress address -> Printf.sprintf "[%i]" address
 end
 
-type operation = Mov
+module Opcode = struct
+  type t = Mov | Add | Sub | Cmp
+
+  let to_string = function
+    | Mov -> "mov"
+    | Add -> "add"
+    | Sub -> "sub"
+    | Cmp -> "cmp"
+end
 
 type instruction =
-  | RegisterMemoryToFromRegister of
-      operation * Direction.t * W.t * Mode.t * Register.t * RegisterMemory.t
-  | ImmediateToRegisterMemory of operation * W.t * Mode.t * RegisterMemory.t * Data.t
-  | ImmediateToRegister of operation * W.t * Register.t * Data.t
-  | MemoryToAccumulator of operation * W.t * Data.t
-  | AccumulatorToMemory of operation * W.t * Data.t
+  (*
+  MOV: 100010dw | mod reg r/m | (DISP-LO) | (DISP-HI)
+  ADD: 000000dw
+  SUB: 001010dw
+  CMP: 001110dw
+  *)
+  | RegisterMemoryToFromRegister of Opcode.t * D.t * W.t * Mode.t * Register.t * RegisterMemory.t
+  (*
+  MOV: 1100011w | mod 000 r/m | (DISP-LO) | (DISP-HI) | data | data if w=1
+  ADD: 100000sw | mod 000 r/m | (DISP-LO) | (DISP-HI) | data | data if s:w=01
+  SUB: 100000sw | mod 101 r/m
+  CMP: 100000sw | mod 111 r/m
+  *)
+  | ImmediateToRegisterMemory of Opcode.t * W.t * Mode.t * RegisterMemory.t * Data.t
+  (*
+  MOV: 1011 w reg | data | data if w=1
+  *)
+  | ImmediateToRegister of Opcode.t * W.t * Register.t * Data.t
+  (*
+  ADD: 0000010w | data | data if w=1
+  *)
+  | ImmediateToAccumulator of Opcode.t * W.t * Data.t
+  (*
+  SUB: 0010110w | data | data if w=1
+  *)
+  | ImmediateFromAccumulator of Opcode.t * W.t * Data.t
+  (*
+  CMP: 0011110w | data
+  *)
+  | ImmediateWithAccumulator of Opcode.t * W.t * Data.t
+  (*
+  MOV: 1010001w | addr-lo | addr-hi
+  *)
+  | MemoryToAccumulator of Opcode.t * W.t * Data.t
+  (*
+  MOV: 1010001w | addr-lo | addr-hi
+  *)
+  | AccumulatorToMemory of Opcode.t * W.t * Data.t
 
 exception InvalidOpcode of int
+
+let parse_register_memory_and_register bytes idx =
+  let first_byte = Bytes.get_uint8 bytes idx in
+  let second_byte = Bytes.get_uint8 bytes (idx + 1) in
+  let d = D.parse first_byte in
+  let w = W.parse first_byte in
+  let mode = Mode.parse (second_byte lsr 6) bytes idx in
+  let register = Register.parse ((second_byte lsr 3) land 0b111) w in
+  let register_memory = RegisterMemory.parse mode (second_byte land 0b111) w in
+  let register_memory = RegisterMemory.parse_direct_address_mode register_memory bytes idx in
+  let bitshift = Mode.bitshift mode + RegisterMemory.direct_address_bitshift register_memory w in
+    (RegisterMemoryToFromRegister (Mov, d, w, mode, register, register_memory), bitshift)
 
 let parse_instruction bytes idx =
   let first_byte = Bytes.get_uint8 bytes idx in
     match first_byte land 0b11110000 with
       | 0b10000000 -> (
         match first_byte land 0b11111100 with
-          | 0b10001000 ->
-            let second_byte = Bytes.get_uint8 bytes (idx + 1) in
-            let direction = Direction.parse first_byte in
-            let w = W.parse first_byte in
-            let mode = Mode.parse (second_byte lsr 6) bytes idx in
-            let register = Register.parse ((second_byte lsr 3) land 0b111) w in
-            let register_memory = RegisterMemory.parse mode (second_byte land 0b111) w in
-            let register_memory =
-              RegisterMemory.parse_direct_address_mode register_memory bytes idx
-            in
-            let bitshift =
-              Mode.bitshift mode + RegisterMemory.direct_address_bitshift register_memory w
-            in
-              ( RegisterMemoryToFromRegister (Mov, direction, w, mode, register, register_memory),
-                bitshift )
+          | 0b10001000 -> parse_register_memory_and_register bytes idx
           | _ -> raise (InvalidOpcode first_byte))
       | 0b11000000 -> (
         match first_byte land 0b11111110 with
@@ -255,28 +303,29 @@ let parse_instruction bytes idx =
             let bitshift = mode_bitshift + W.bitshift data_size in
               (AccumulatorToMemory (Mov, data_size, data), bitshift)
           | _ -> raise (InvalidOpcode first_byte))
-      | _ -> failwith (Printf.sprintf "Invalid opcodeee %i" (Bytes.get_uint8 bytes (idx - 0)))
+      | _ ->
+        failwith
+          (Printf.sprintf "Invalid opcode %s" (int_to_binary (Bytes.get_uint8 bytes (idx - 2))))
 
-let instruction_to_string = function
-  | RegisterMemoryToFromRegister (Mov, direction, _, _, register, register_memory) -> (
-    let reg = Register.to_string register in
-    let rm = RegisterMemory.to_string register_memory in
-      match direction with
-        | `DestinationToRegister -> Printf.sprintf "mov %s, %s" reg rm
-        | `SourceFromRegister -> Printf.sprintf "mov %s, %s" rm reg)
-  | ImmediateToRegisterMemory (Mov, data_size, mode, register_memory, (Word data | Byte data)) -> (
-    match mode with
-      | Register -> Printf.sprintf "mov %s" (RegisterMemory.to_string register_memory)
-      | Memory _ -> (
-        match data_size with
-          | W.Byte ->
-            Printf.sprintf "mov %s byte %i" (RegisterMemory.to_string register_memory) data
-          | W.Word ->
-            (Printf.sprintf "mov %s word %i" (RegisterMemory.to_string register_memory)) data))
-  | ImmediateToRegister (Mov, _, register, (Word data | Byte data)) ->
-    Printf.sprintf "mov %s, %i" (Register.to_string register) data
-  | MemoryToAccumulator (Mov, _, (Word data | Byte data)) -> Printf.sprintf "mov ax, [%i]" data
-  | AccumulatorToMemory (Mov, _, (Word data | Byte data)) -> Printf.sprintf "mov [%i], ax" data
+let instruction_to_string instruction =
+  match instruction with
+    | RegisterMemoryToFromRegister (opcode, direction, _, _, register, register_memory) -> (
+      let reg = Register.to_string register in
+      let rm = RegisterMemory.to_string register_memory in
+        match direction with
+          | DestinationToRegister -> Printf.sprintf "mov %s, %s" reg rm
+          | SourceFromRegister -> Printf.sprintf "mov %s, %s" rm reg)
+    | ImmediateToRegisterMemory (opcode, _, _, register_memory, data) ->
+      Printf.sprintf "%s %s %s" (Opcode.to_string opcode)
+        (RegisterMemory.to_string register_memory)
+        (Data.to_string data)
+    | ImmediateToRegister (opcode, _, register, (Word data | Byte data)) ->
+      Printf.sprintf "mov %s, %i" (Register.to_string register) data
+    | MemoryToAccumulator (opcode, _, (Word data | Byte data)) -> Printf.sprintf "mov ax, [%i]" data
+    | AccumulatorToMemory (opcode, _, (Word data | Byte data)) -> Printf.sprintf "mov [%i], ax" data
+    | ImmediateToAccumulator (opcode, w, data) -> "fo"
+    | ImmediateFromAccumulator (opcode, w, data) -> "fo"
+    | ImmediateWithAccumulator (opcode, w, data) -> "fo"
 
 let read_bytes_from_file filename =
   let ic = open_in_bin filename in
@@ -296,6 +345,6 @@ let print_bytes_in_binary bytes =
     done
 
 let () =
-  let filename = "./part1/listing_0040_challenge_movs" in
+  let filename = "./part1/listing_0039_more_movs" in
   let bytes = read_bytes_from_file filename in
     print_bytes_in_binary bytes
